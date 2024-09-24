@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Example demonstrating HTTP integrations with Step Functions and API destinations with EventBridge
+
+Parameters:
+  ConnectionArn:
+    Type: String
+    Description: The Amazon Resource Name (ARN) of the connection to use for the Momento API
+  CacheName:
+    Type: String
+    Description: Name of the Momento cache
+    Default: game
+  SecretId:
+    Type: String
+    Description: Arn of the Secrets Manager secret containing your Momento API key
+
+
+Metadata:
+  esbuild-properties: &esbuild-properties
+    Format: esm
+    Minify: true
+    OutExtension:
+      - .js=.mjs
+    Target: es2020
+    Sourcemap: false
+    EntryPoints:
+      - index.mjs
+    Banner:
+      - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+    External:
+      - '@aws-sdk/*'
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Tracing: Active
+    Timeout: 15
+    MemorySize: 1024
+    CodeUri: functions
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+
+Resources:
+  GameApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      DefinitionBody:
+        'Fn::Transform':
+          Name: AWS::Include
+          Parameters:
+            Location: ./openapi.yaml
+
+  UserTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  PlayGameFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        <<: *esbuild-properties
+        EntryPoints:
+          - play-game.mjs
+    Properties:
+      Handler: play-game.handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt UserTable.Arn
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref SecretId
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref UserTable
+          SECRET_ID: !Ref SecretId
+          CACHE_NAME: !Ref CacheName
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref GameApi
+            Path: /game
+            Method: GET
+
+  LevelUpUserFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        <<: *esbuild-properties
+        EntryPoints:
+          - level-up-user.mjs
+    Properties:
+      Handler: level-up-user.handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt UserTable.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref UserTable
+
+  CachePutApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !Ref ConnectionArn
+      HttpMethod: PUT
+      InvocationEndpoint: https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/cache/*
+      InvocationRateLimitPerSecond: 300
+
+  PipeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/pipes/StreamToCachePipe
+      RetentionInDays: 3
+
+  StreamToCachePipeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBStreamAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt UserTable.StreamArn
+        - PolicyName: ApiDestinationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: !GetAtt CachePutApiDestination.Arn
+        - PolicyName: ConnectionAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:RetrieveConnectionCredentials
+                Resource: !Ref ConnectionArn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:events!connection/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt PipeLogGroup.Arn
+
+  StreamToCachePipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      Source: !GetAtt UserTable.StreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName": ["INSERT", "MODIFY"]}'
+      Target: !GetAtt CachePutApiDestination.Arn
+      TargetParameters:
+        InputTemplate: '{"id": "<$.dynamodb.Keys.pk.S>", "exp": <$.dynamodb.NewImage.exp.N>, "level": <$.dynamodb.NewImage.level.N>, "username": "<$.dynamodb.NewImage.username.S>" }'
+        HttpParameters:
+          PathParameterValues:
+            - !Ref CacheName
+          QueryStringParameters:
+            ttl_seconds: 3600
+            key: $.dynamodb.Keys.pk.S
+      RoleArn: !GetAtt StreamToCachePipeRole.Arn
+      LogConfiguration:
+        Level: INFO
+        IncludeExecutionData: ['ALL']
+        CloudwatchLogsLogDestination:
+          LogGroupArn: !GetAtt PipeLogGroup.Arn
+
+  SquirrelCaughtStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: state-machines/squirrel-caught.asl.json
+      DefinitionSubstitutions:
+        HttpInvoke: !Sub arn:${AWS::Partition}:states:::http:invoke
+        Connection: !Ref ConnectionArn
+        CacheName: !Ref CacheName
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        LevelUpUser: !GetAtt LevelUpUserFunction.Arn
+        TableName: !Ref UserTable
+        DynamoDbGetItem: !Sub arn:${AWS::Partition}:states:::dynamodb:getItem
+        DynamoDbPutItem: !Sub arn:${AWS::Partition}:states:::dynamodb:putItem
+        EventBridgePutEvents: !Sub arn:${AWS::Partition}:states:::events:putEvents
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt UserTable.Arn
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt LevelUpUserFunction.Arn
+            - Effect: Allow
+              Action: states:InvokeHTTPEndpoint
+              Resource: '*'
+            - Effect: Allow
+              Action: events:RetrieveConnectionCredentials
+              Resource: !Ref ConnectionArn
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:DescribeSecret
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:events!connection/*
+            - Effect: Allow
+              Action: events:PutEvents
+              Resource: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default
+
+  CaughtSquirrelRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ApiDirectStart
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Action: states:StartExecution
+              Effect: Allow
+              Resource: !Ref SquirrelCaughtStateMachine
+
+Outputs:
+  ApiBaseUrl:
+    Description: API Gateway endpoint for the game API
+    Value: !Sub 'https://${GameApi}.execute-api.${AWS::Region}.amazonaws.com/v1'

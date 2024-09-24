@@ -1,0 +1,124 @@
+openapi: 3.0.0
+info:
+  title: Game API
+  description: API for game play with SFN and EventBridge
+  version: 1.0.0
+
+x-amazon-apigateway-cors:
+  allowOrigins:
+    - '*'
+  allowMethods:
+    - POST
+  allowHeaders:
+    - content-type
+  maxAge: 3600
+
+paths:
+  /game:
+    get:
+      summary: Returns an HTML page with the game
+      responses:
+        200:
+          description: OK
+          content:
+            text/html:
+              schema:
+                type: string
+        500:
+          $ref: '#/components/responses/InternalServerError'
+
+  /squirrels:
+    post:
+      summary: Attempt to claim a squirrel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+              required:
+                - id
+      responses:
+        204:
+          description: No Content
+        400:
+          $ref: '#/components/responses/ClientError'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-integration:
+        integrationSubtype: StepFunctions-StartExecution
+        credentials:
+          Fn::GetAtt: [CaughtSquirrelRole, Arn]
+        requestParameters:
+          StateMachineArn:
+            Fn::GetAtt: [SquirrelCaughtStateMachine, Arn]
+          Input: "{ \"id\": \"$input.json('$.id')\", \"userId\": \"$context.identity.sourceIp\" }"
+        payloadFormatVersion: "2.0"
+        type: "aws_proxy"
+        connectionType: "INTERNET"
+
+components:
+  responses:
+    ClientError: #400
+      description: The request was in an invalid format
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: Could not perform operation with provided data
+            required:
+              - message
+    Forbidden: #403
+      description: The caller is not authorized to perform this operation
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: Forbidden
+            required:
+              - message
+    NotFound: #404
+      description: The requested item was not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: Could not find an account with the specified id.
+            required:
+              - message
+    Conflict: #409
+      description: The requested item was not in the proper state
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: The provided platform is not configured
+            required:
+              - message
+    InternalServerError: #500
+      description: The server encountered an unexpected condition which prevented it from fulfilling the request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: An error occurred saving the item.
+            required:
+              - message

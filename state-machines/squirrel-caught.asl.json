@@ -1,0 +1,377 @@
+{
+  "Comment": "Async tasks when the squirrel is caught",
+  "StartAt": "Check Location Cache - Momento",
+  "States": {
+    "Check Location Cache - Momento": {
+      "Type": "Task",
+      "Resource": "${HttpInvoke}",
+      "Parameters": {
+        "Method": "GET",
+        "Authentication": {
+          "ConnectionArn": "${Connection}"
+        },
+        "ApiEndpoint": "https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/cache/${CacheName}",
+        "QueryParameters": {
+          "key": "location"
+        },
+        "Headers": {
+          "Accept": "application/json"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "BackoffRate": 2,
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.Http.StatusCode.404"
+          ],
+          "Next": "Set Default Location"
+        }
+      ],
+      "ResultSelector": {
+        "data.$": "$.ResponseBody"
+      },
+      "ResultPath": "$.location",
+      "Next": "Idempotency Check"
+    },
+    "Idempotency Check": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$$.Execution.Input.squirrelId",
+          "StringEqualsPath": "$.location.data.id",
+          "Next": "Start Tasks"
+        }
+      ],
+      "Default": "Idempotency Check Failed"
+    },
+    "Set Default Location": {
+      "Type": "Pass",
+      "Parameters": {
+        "message": {
+          "id.$": "$$.Execution.Name",
+          "x": 1,
+          "y": 1
+        }
+      },
+      "Next": "Put Default Location in Cache"
+    },
+    "Put Default Location in Cache": {
+      "Type": "Task",
+      "Resource": "${HttpInvoke}",
+      "Parameters": {
+        "Authentication": {
+          "ConnectionArn": "${Connection}"
+        },
+        "ApiEndpoint": "https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/cache/game",
+        "Method": "PUT",
+        "RequestBody.$": "$.message",
+        "QueryParameters": {
+          "ttl_seconds": 300,
+          "key": "location"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "BackoffRate": 2,
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Publish Default Location",
+      "ResultPath": null
+    },
+    "Publish Default Location": {
+      "Type": "Task",
+      "Resource": "${EventBridgePutEvents}",
+      "Parameters": {
+        "Entries": [
+          {
+            "Detail": {
+              "cacheName": "game",
+              "topicName": "location",
+              "message.$": "$.message"
+            },
+            "DetailType": "topicPublish",
+            "Source": "SquirrelCaughtStateMachine"
+          }
+        ]
+      },
+      "Next": "Idempotency Check Failed"
+    },
+    "Idempotency Check Failed": {
+      "Type": "Succeed"
+    },
+    "Start Tasks": {
+      "Type": "Parallel",
+      "End": true,
+      "Branches": [
+        {
+          "StartAt": "Check Player Cache - Momento",
+          "States": {
+            "Check Player Cache - Momento": {
+              "Type": "Task",
+              "Resource": "${HttpInvoke}",
+              "Parameters": {
+                "Method": "GET",
+                "Authentication": {
+                  "ConnectionArn": "${Connection}"
+                },
+                "ApiEndpoint": "https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/cache/${CacheName}",
+                "QueryParameters": {
+                  "key.$": "$$.Execution.Input.userId"
+                },
+                "Headers": {
+                  "Accept": "application/json"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "BackoffRate": 2,
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "JitterStrategy": "FULL"
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.Http.StatusCode.404"
+                  ],
+                  "Next": "Load user from db"
+                }
+              ],
+              "ResultSelector": {
+                "user.$": "$.ResponseBody"
+              },
+              "Next": "Update user exp"
+            },
+            "Update user exp": {
+              "Type": "Task",
+              "Resource": "${LambdaInvoke}",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "FunctionName": "${LevelUpUser}",
+                "Payload": {
+                  "user.$": "$.user",
+                  "exp": "2"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Did user level up?"
+            },
+            "Did user level up?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.didUserLevelUp",
+                  "BooleanEquals": true,
+                  "Next": "Publish level up to players"
+                }
+              ],
+              "Default": "Success"
+            },
+            "Publish level up to players": {
+              "Type": "Task",
+              "Resource": "${HttpInvoke}",
+              "Parameters": {
+                "Authentication": {
+                  "ConnectionArn": "${Connection}"
+                },
+                "ApiEndpoint.$": "States.Format('https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/topics/${CacheName}/{}', $$.Execution.Input.userId)",
+                "Method": "POST",
+                "RequestBody": {
+                  "level.$": "$.level"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "BackoffRate": 2,
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "JitterStrategy": "FULL"
+                }
+              ],
+              "Next": "Success",
+              "ResultPath": null
+            },
+            "Load user from db": {
+              "Type": "Task",
+              "Resource": "${DynamoDbGetItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Key": {
+                  "pk": {
+                    "S.$": "$$.Execution.Input.userId"
+                  },
+                  "sk": {
+                    "S": "user"
+                  }
+                }
+              },
+              "Next": "User exists?"
+            },
+            "User exists?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Item",
+                  "IsPresent": true,
+                  "Next": "Format user"
+                }
+              ],
+              "Default": "Build new user"
+            },
+            "Build new user": {
+              "Type": "Pass",
+              "Parameters": {
+                "user": {
+                  "id.$": "$$.Execution.Input.userId",
+                  "username.$": "$$.Execution.Id",
+                  "level": 1,
+                  "exp": 0
+                }
+              },
+              "Next": "Save new user"
+            },
+            "Save new user": {
+              "Type": "Task",
+              "Resource": "${DynamoDbPutItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Item": {
+                  "pk": {
+                    "S.$": "$.user.id"
+                  },
+                  "sk": {
+                    "S": "user"
+                  },
+                  "username": {
+                    "S.$": "$.user.username"
+                  },
+                  "level": {
+                    "N.$": "States.Format('{}', $.user.level)"
+                  },
+                  "exp": {
+                    "N.$": "States.Format('{}', $.user.exp)"
+                  }
+                }
+              },
+              "Next": "Update user exp",
+              "ResultPath": null
+            },
+            "Format user": {
+              "Type": "Pass",
+              "Parameters": {
+                "user": {
+                  "id.$": "$.Item.pk.S",
+                  "username.$": "$.Item.username.S",
+                  "level.$": "$.Item.level.N",
+                  "exp.$": "$.Item.exp.N"
+                }
+              },
+              "Next": "Update user exp"
+            },
+            "Success": {
+              "Type": "Succeed"
+            }
+          }
+        },
+        {
+          "StartAt": "Calculate Next Location",
+          "States": {
+            "Calculate Next Location": {
+              "Type": "Pass",
+              "Parameters": {
+                "message": {
+                  "id.$": "$$.Execution.Name",
+                  "x.$": "States.MathRandom(1, 10)",
+                  "y.$": "States.MathRandom(1, 10)"
+                }
+              },
+              "Next": "Update Location in Cache"
+            },
+            "Update Location in Cache": {
+              "Type": "Task",
+              "Resource": "${HttpInvoke}",
+              "Parameters": {
+                "Authentication": {
+                  "ConnectionArn": "${Connection}"
+                },
+                "ApiEndpoint": "https://api.cache.cell-us-east-1-1.prod.a.momentohq.com/cache/${CacheName}",
+                "Method": "PUT",
+                "RequestBody.$": "$.message",
+                "QueryParameters": {
+                  "ttl_seconds": 300,
+                  "key": "location"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "BackoffRate": 2,
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "JitterStrategy": "FULL"
+                }
+              ],
+              "Next": "Publish Next Location",
+              "ResultPath": null
+            },
+            "Publish Next Location": {
+              "Type": "Task",
+              "Resource": "${EventBridgePutEvents}",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Detail": {
+                      "cacheName": "${CacheName}",
+                      "topicName": "location",
+                      "message.$": "$.message"
+                    },
+                    "DetailType": "topicPublish",
+                    "Source": "SquirrelCaughtStateMachine"
+                  }
+                ]
+              },
+              "End": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}

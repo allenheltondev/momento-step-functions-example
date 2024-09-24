@@ -1,0 +1,20 @@
+{
+  "name": "momento-step-functions-example",
+  "version": "1.0.0",
+  "description": "Example project showing how to use Momento integrated with Step Functions and EventBridge",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.635.0",
+    "@aws-sdk/util-dynamodb": "^3.635.0"
+  },
+  "dependencies": {
+    "@aws-lambda-powertools/parameters": "^2.7.0",
+    "@faker-js/faker": "^9.0.0",
+    "@gomomento/sdk": "^1.98.1"
+  }
+}
