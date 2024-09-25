@@ -11,9 +11,9 @@ Parameters:
     Type: String
     Description: Name of the Momento cache
     Default: game
-  SecretId:
+  MomentoApiKey:
     Type: String
-    Description: Arn of the Secrets Manager secret containing your Momento API key
+    Description: Momento Api Key
 
 
 Metadata:
@@ -43,10 +43,15 @@ Globals:
     Environment:
       Variables:
         AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST'"
+      AllowHeaders: "'Content-Type'"
+      AllowOrigin: "'*'"
 
 Resources:
   GameApi:
-    Type: AWS::Serverless::HttpApi
+    Type: AWS::Serverless::Api
     Properties:
       StageName: v1
       DefinitionBody:
@@ -91,19 +96,16 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:PutItem
               Resource: !GetAtt UserTable.Arn
-            - Effect: Allow
-              Action: secretsmanager:GetSecretValue
-              Resource: !Ref SecretId
       Environment:
         Variables:
           TABLE_NAME: !Ref UserTable
-          SECRET_ID: !Ref SecretId
           CACHE_NAME: !Ref CacheName
+          MOMENTO_API_KEY: !Ref MomentoApiKey
       Events:
         ApiEvent:
-          Type: HttpApi
+          Type: Api
           Properties:
-            ApiId: !Ref GameApi
+            RestApiId: !Ref GameApi
             Path: /game
             Method: GET
 
@@ -255,6 +257,13 @@ Resources:
             - Effect: Allow
               Action: events:PutEvents
               Resource: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GameApi
+            Path: /squirrels
+            Method: POST
 
   CaughtSquirrelRole:
     Type: AWS::IAM::Role

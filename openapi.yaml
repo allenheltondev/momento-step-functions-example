@@ -4,6 +4,11 @@ info:
   description: API for game play with SFN and EventBridge
   version: 1.0.0
 
+x-amazon-apigateway-request-validators:
+  Validate All:
+    validateRequestParameters: true
+    validateRequestBody: true
+
 x-amazon-apigateway-cors:
   allowOrigins:
     - '*'
@@ -26,6 +31,12 @@ paths:
                 type: string
         500:
           $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate All
+      x-amazon-apigateway-integration:
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PlayGameFunction.Arn}/invocations
+        httpMethod: POST
+        type: aws_proxy
 
   /squirrels:
     post:
@@ -42,23 +53,37 @@ paths:
               required:
                 - id
       responses:
-        204:
+        202:
           description: No Content
         400:
           $ref: '#/components/responses/ClientError'
         500:
           $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate All
       x-amazon-apigateway-integration:
-        integrationSubtype: StepFunctions-StartExecution
         credentials:
-          Fn::GetAtt: [CaughtSquirrelRole, Arn]
-        requestParameters:
-          StateMachineArn:
-            Fn::GetAtt: [SquirrelCaughtStateMachine, Arn]
-          Input: "{ \"id\": \"$input.json('$.id')\", \"userId\": \"$context.identity.sourceIp\" }"
-        payloadFormatVersion: "2.0"
-        type: "aws_proxy"
-        connectionType: "INTERNET"
+          Fn::Sub: ${CaughtSquirrelRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartExecution
+        httpMethod: POST
+        type: aws
+        requestTemplates:
+          application/json:
+            Fn::Sub:
+              - |-
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($body = "{""detail"" : $input.json('$'), ""userId"": ""$context.identity.sourceIp""}")
+                {
+                    "input": "$util.escapeJavaScript($body)",
+                    "stateMachineArn": "${StateMachine}"
+                }
+              - { StateMachine: { "Ref": "SquirrelCaughtStateMachine" }}
+        responses:
+          200:
+            statusCode: 202
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
 
 components:
   responses:

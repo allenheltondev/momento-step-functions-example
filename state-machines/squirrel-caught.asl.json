@@ -47,7 +47,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Variable": "$$.Execution.Input.squirrelId",
+          "Variable": "$$.Execution.Input.detail.id",
           "StringEqualsPath": "$.location.data.id",
           "Next": "Start Tasks"
         }
